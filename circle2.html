@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>円フィッティング＆再計算（Y軸反転・反時計回り）</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    textarea { width: 100%; }
+    .input-section, .results-section {
+      display: flex; 
+      gap: 20px; 
+      flex-wrap: wrap;
+    }
+    .input-box, .result-box {
+      flex: 1 1 300px;
+    }
+    canvas {
+      border: 1px solid #ccc; 
+      margin-top: 10px;
+    }
+    pre {
+      background: #f8f8f8; 
+      padding: 10px;
+    }
+    .control-section {
+      margin-top: 20px;
+    }
+    .control-section label {
+      margin-right: 10px;
+    }
+    .recalcSection {
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <h1>円フィッティング＆再計算（Y軸反転・反時計回り）</h1>
+  <p>
+    このアプリでは、<b>Y軸を反転</b>して計算します。座標データ上の <code>y</code> が大きいほど「上方向」とみなし、<br>
+    右（正のx軸）を 0° として、<b>反時計回り</b>に角度が増えるようにしています。<br>
+    例：開始角度0°～終了角度60° と指定した場合、右→上方向へ 60° の円弧が対象。<br>
+    <b>座標入力：</b> 各行「x, y」形式（mm 単位）で入力してください。データセット2は任意（片方のみでも解析可能）です。
+  </p>
+
+  <!-- 入力欄 -->
+  <div class="input-section">
+    <div class="input-box">
+      <h2>データセット 1</h2>
+      <textarea id="coords1" rows="10" placeholder="例:
+10, 20
+15, 25
+20, 30"></textarea>
+    </div>
+    <div class="input-box">
+      <h2>データセット 2 (任意)</h2>
+      <textarea id="coords2" rows="10" placeholder="例:
+12, 22
+17, 27
+22, 32"></textarea>
+    </div>
+  </div>
+
+  <!-- ボタン・倍率指定 -->
+  <div class="control-section">
+    <label for="errorMultiplier">エラー倍率 (px/mm):</label>
+    <input type="number" id="errorMultiplier" value="100" step="1">
+    <button onclick="calculateAndDraw()">計算・描画する</button>
+  </div>
+  <hr>
+
+  <!-- 結果表示 -->
+  <div class="results-section">
+    <!-- データセット1 -->
+    <div class="result-box">
+      <h2>結果 1</h2>
+      <pre id="result1"></pre>
+      <canvas id="canvas1" width="500" height="500"></canvas>
+
+      <!-- 再計算用の角度範囲指定とボタン -->
+      <div class="recalcSection">
+        <label>再計算開始角度 (°):</label>
+        <input type="number" id="recalcStart1" value="0" step="1">
+        <label>再計算終了角度 (°):</label>
+        <input type="number" id="recalcEnd1" value="60" step="1">
+        <button 
+          onclick="recalculateDataset(
+            'canvas1',
+            'recalcResult1',
+            'recalcStart1',
+            'recalcEnd1',
+            globalPoints1,
+            globalAnalysis1
+          )">
+          再計算
+        </button>
+      </div>
+      <pre id="recalcResult1" class="recalcResult"></pre>
+      <!-- 再計算結果用キャンバス -->
+      <canvas id="canvas1_recalc" width="500" height="500"></canvas>
+    </div>
+
+    <!-- データセット2 -->
+    <div class="result-box">
+      <h2>結果 2</h2>
+      <pre id="result2"></pre>
+      <canvas id="canvas2" width="500" height="500"></canvas>
+
+      <div class="recalcSection">
+        <label>再計算開始角度 (°):</label>
+        <input type="number" id="recalcStart2" value="0" step="1">
+        <label>再計算終了角度 (°):</label>
+        <input type="number" id="recalcEnd2" value="60" step="1">
+        <button 
+          onclick="recalculateDataset(
+            'canvas2',
+            'recalcResult2',
+            'recalcStart2',
+            'recalcEnd2',
+            globalPoints2,
+            globalAnalysis2
+          )">
+          再計算
+        </button>
+      </div>
+      <pre id="recalcResult2" class="recalcResult"></pre>
+      <canvas id="canvas2_recalc" width="500" height="500"></canvas>
+    </div>
+  </div>
+
+  <script>
+    // グローバル変数：最初の解析結果や座標を保存
+    var globalPoints1 = null, globalAnalysis1 = null;
+    var globalPoints2 = null, globalAnalysis2 = null;
+
+    // ---------- 解析の基本関数 ----------
+
+    // テキストエリアの座標をパース
+    function parsePoints(input) {
+      const lines = input.split("\n");
+      const points = [];
+      for (let line of lines) {
+        line = line.trim();
+        if (line === "") continue;
+        const parts = line.split(/[\s,]+/);
+        if (parts.length < 2) continue;
+        const x = parseFloat(parts[0]);
+        const y = parseFloat(parts[1]);
+        if (!isNaN(x) && !isNaN(y)) {
+          points.push({ x, y });
+        }
+      }
+      return points;
+    }
+
+    // 3×3 連立方程式をガウス消去法で解く
+    function solveLinearSystem(M, v) {
+      const n = 3;
+      for (let i = 0; i < n; i++) {
+        // ピボット選択
+        let maxRow = i;
+        for (let k = i + 1; k < n; k++) {
+          if (Math.abs(M[k][i]) > Math.abs(M[maxRow][i])) {
+            maxRow = k;
+          }
+        }
+        // 行入れ替え
+        if (maxRow !== i) {
+          [M[i], M[maxRow]] = [M[maxRow], M[i]];
+          [v[i], v[maxRow]] = [v[maxRow], v[i]];
+        }
+        // ピボットが非常に小さいときは特異
+        if (Math.abs(M[i][i]) < 1e-12) {
+          throw new Error("特異な行列です。");
+        }
+        // 前進消去
+        for (let k = i + 1; k < n; k++) {
+          const factor = M[k][i] / M[i][i];
+          for (let j = i; j < n; j++) {
+            M[k][j] -= factor * M[i][j];
+          }
+          v[k] -= factor * v[i];
+        }
+      }
+      // 後退代入
+      const x = new Array(n);
+      for (let i = n - 1; i >= 0; i--) {
+        let sum = 0;
+        for (let j = i + 1; j < n; j++) {
+          sum += M[i][j] * x[j];
+        }
+        x[i] = (v[i] - sum) / M[i][i];
+      }
+      return x;
+    }
+
+    // 円フィッティング
+    // Y軸を反転するので、角度は「atan2(p.y - centerY, p.x - centerX)」で計算
+    //   → yが大きいほど上方向になる
+    // 右(0°)→上(90°)→左(180°)→下(270°)
+    function fitCircle(points) {
+      const n = points.length;
+      let sumX = 0, sumY = 0, sumXX = 0, sumYY = 0, sumXY = 0;
+      let sumR = 0, sumXr = 0, sumYr = 0;
+
+      for (const p of points) {
+        const x = p.x, y = p.y;
+        sumX += x;
+        sumY += y;
+        sumXX += x * x;
+        sumYY += y * y;
+        sumXY += x * y;
+        const r2 = x*x + y*y;
+        sumR += r2;
+        sumXr += x*r2;
+        sumYr += y*r2;
+      }
+
+      const M = [
+        [sumXX, sumXY, sumX],
+        [sumXY, sumYY, sumY],
+        [sumX,  sumY,  n]
+      ];
+      const v = [-sumXr, -sumYr, -sumR];
+      const sol = solveLinearSystem(M, v);
+      const A = sol[0], B = sol[1], C = sol[2];
+
+      const centerX = -A / 2;
+      const centerY = -B / 2;
+      const radius = Math.sqrt((A*A + B*B)/4 - C);
+
+      // 角度計算：atan2(p.y - centerY, p.x - centerX) で反時計回り
+      let angles = points.map(p => {
+        let a = Math.atan2(p.y - centerY, p.x - centerX);
+        if(a < 0) a += 2 * Math.PI;
+        return a;
+      });
+      angles.sort((a,b)=> a-b);
+
+      // 隣接角度差を計算し、最大ギャップを探す
+      let maxGap = 0, gapIdx = 0;
+      for (let i = 0; i < n; i++) {
+        let next = (i+1) % n;
+        let diff = (i === n-1)
+          ? (angles[0] + 2*Math.PI - angles[i])
+          : (angles[i+1] - angles[i]);
+        if(diff > maxGap) {
+          maxGap = diff;
+          gapIdx = i;
+        }
+      }
+
+      // arcAngle = 360° - maxGap
+      let arcAngle = 2*Math.PI - maxGap;
+      let startAngle = angles[(gapIdx + 1) % n];
+      let endAngle   = angles[gapIdx];
+
+      // 平均差を見て、最大ギャップが1.5倍未満なら閉じた円扱い
+      let sumDiff = 0;
+      for (let i = 0; i < n; i++) {
+        let next = (i+1) % n;
+        let df = (i === n-1) ? (angles[0] + 2*Math.PI - angles[i]) : (angles[i+1] - angles[i]);
+        sumDiff += df;
+      }
+      let avgDiff = sumDiff / n;
+      if(maxGap < 1.5 * avgDiff) {
+        // 完全な円に近い
+        startAngle = angles[0];
+        endAngle   = angles[n-1];
+        arcAngle   = endAngle - startAngle;
+      }
+
+      const arcPercent = (arcAngle / (2*Math.PI)) * 100;
+      return {
+        centerX, centerY, radius,
+        startAngle, endAngle, arcAngle, arcPercent,
+        angles
+      };
+    }
+
+    // 解析結果まとめ
+    function computeAnalysis(points) {
+      const circle = fitCircle(points);
+      const { centerX, centerY, radius, startAngle, endAngle, arcAngle, arcPercent, angles } = circle;
+
+      const startAngleDeg = startAngle * 180/Math.PI;
+      const endAngleDeg   = endAngle   * 180/Math.PI;
+      const arcAngleDeg   = arcAngle   * 180/Math.PI;
+      const arcLength     = radius * arcAngle;
+
+      // 誤差や真円度
+      const distances = points.map(p => Math.hypot(p.x - centerX, p.y - centerY));
+      const deviations = distances.map(d => d - radius);
+      const absDeviations = deviations.map(e => Math.abs(e));
+      const meanAbsError = absDeviations.reduce((a,b)=> a+b, 0) / points.length;
+      const rmsError = Math.sqrt(deviations.reduce((a,b)=> a + b*b, 0) / points.length);
+      const maxAbsError = Math.max(...absDeviations);
+      const minMeasuredRadius = Math.min(...distances);
+      const maxMeasuredRadius = Math.max(...distances);
+      const circularity = ((maxMeasuredRadius - minMeasuredRadius) / radius) * 100;
+      const roundnessError = (maxMeasuredRadius - minMeasuredRadius) * 1000;
+
+      return {
+        centerX, centerY, radius,
+        startAngle, endAngle, arcAngle, arcPercent,
+        startAngleDeg, endAngleDeg, arcAngleDeg, arcLength,
+        meanAbsError, rmsError, maxAbsError,
+        minMeasuredRadius, maxMeasuredRadius,
+        circularity, roundnessError,
+        angles
+      };
+    }
+
+    // キャンバスに描画
+    //   - 誤差を拡大表示（errorMultiplier）
+    //   - 隣接角度差が「ほぼ均等」なら閉じた円、それ以外なら最大ギャップペアをスキップ
+    function drawRoundnessDiagram(canvasId, points, analysis, errorMultiplier) {
+      const canvas = document.getElementById(canvasId);
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0,0,canvas.width, canvas.height);
+
+      const baseCirclePx = 100;
+      const cx = canvas.width/2, cy = canvas.height/2;
+
+      // グレーの基準円
+      ctx.beginPath();
+      ctx.setLineDash([5,5]);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = "gray";
+      ctx.arc(cx, cy, baseCirclePx, 0, 2*Math.PI);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // 誤差反映後の座標計算
+      // ここも Y軸反転のため： angle = atan2(p.y - centerY, p.x - centerX)
+      const drawPoints = points.map(p => {
+        let angle = Math.atan2(p.y - analysis.centerY, p.x - analysis.centerX);
+        if(angle < 0) angle += 2*Math.PI;
+
+        const measured_r = Math.hypot(p.x - analysis.centerX, p.y - analysis.centerY);
+        const error_mm = measured_r - analysis.radius;
+        const drawnRadius = baseCirclePx + errorMultiplier * error_mm;
+
+        return {
+          angle,
+          x: cx + drawnRadius * Math.cos(angle),
+          y: cy + drawnRadius * Math.sin(angle)
+        };
+      });
+      drawPoints.sort((a,b)=> a.angle - b.angle);
+
+      // 隣接角度差
+      const n = drawPoints.length;
+      let diffs = [];
+      for (let i = 0; i < n; i++) {
+        let next = (i+1) % n;
+        let diff = (i === n-1)
+          ? (drawPoints[0].angle + 2*Math.PI - drawPoints[i].angle)
+          : (drawPoints[i+1].angle - drawPoints[i].angle);
+        diffs.push(diff);
+      }
+      const sumDiff = diffs.reduce((a,b)=> a+b, 0);
+      const avgDiff = sumDiff / n;
+
+      ctx.strokeStyle = "blue";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+
+      let maxDiff = Math.max(...diffs);
+      let maxIdx  = diffs.indexOf(maxDiff);
+
+      // ほぼ均等なら閉じた円
+      if(maxDiff < 1.5 * avgDiff) {
+        ctx.moveTo(drawPoints[0].x, drawPoints[0].y);
+        for(let i=1; i<n; i++){
+          ctx.lineTo(drawPoints[i].x, drawPoints[i].y);
+        }
+        ctx.closePath();
+      } else {
+        // 最大ギャップペアをスキップ
+        ctx.moveTo(drawPoints[0].x, drawPoints[0].y);
+        for(let i=0; i<n; i++){
+          let next = (i+1) % n;
+          if(i === maxIdx) {
+            ctx.moveTo(drawPoints[next].x, drawPoints[next].y);
+          } else {
+            ctx.lineTo(drawPoints[next].x, drawPoints[next].y);
+          }
+        }
+      }
+      ctx.stroke();
+
+      // 赤い点
+      ctx.fillStyle = "red";
+      for(const pt of drawPoints){
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 3, 0, 2*Math.PI);
+        ctx.fill();
+      }
+    }
+
+    // 再計算（指定角度範囲内だけ抽出）→描画
+    function recalculateDataset(canvasId, resultDivId, startInputId, endInputId, points, analysis) {
+      if (!points || !analysis) {
+        document.getElementById(resultDivId).innerText = "解析情報がありません。";
+        return;
+      }
+      const startDeg = parseFloat(document.getElementById(startInputId).value);
+      const endDeg   = parseFloat(document.getElementById(endInputId).value);
+      if (isNaN(startDeg) || isNaN(endDeg)) {
+        document.getElementById(resultDivId).innerText = "有効な角度を入力してください。";
+        return;
+      }
+      const startRad = startDeg * Math.PI/180;
+      const endRad   = endDeg   * Math.PI/180;
+
+      // 角度 = atan2(p.y - centerY, p.x - centerX) (反時計回り)
+      const filtered = [];
+      for (let p of points) {
+        let a = Math.atan2(p.y - analysis.centerY, p.x - analysis.centerX);
+        if(a < 0) a += 2*Math.PI;
+
+        let inRange = false;
+        if (startRad <= endRad) {
+          inRange = (a >= startRad && a <= endRad);
+        } else {
+          // wrap-around
+          inRange = (a >= startRad || a <= endRad);
+        }
+        if(inRange) {
+          filtered.push(p);
+        }
+      }
+      if(filtered.length < 3) {
+        document.getElementById(resultDivId).innerText = "選択範囲内に十分な点がありません。";
+        return;
+      }
+
+      // 再計算
+      const newAnalysis = computeAnalysis(filtered);
+      let txt = "【再計算結果】\n";
+      txt += `中心 = (${newAnalysis.centerX.toFixed(4)}, ${newAnalysis.centerY.toFixed(4)})\n`;
+      txt += `半径 = ${newAnalysis.radius.toFixed(4)} mm\n`;
+      txt += `円弧範囲 = ${newAnalysis.startAngleDeg.toFixed(2)}° ～ ${newAnalysis.endAngleDeg.toFixed(2)}°\n`;
+      txt += `弧長 = ${newAnalysis.arcLength.toFixed(4)} mm\n`;
+      document.getElementById(resultDivId).innerText = txt;
+
+      // 再計算結果用の描画キャンバス
+      const recalcCanvasId = canvasId + "_recalc";
+      let recalcCanvas = document.getElementById(recalcCanvasId);
+      if (!recalcCanvas) {
+        recalcCanvas = document.createElement("canvas");
+        recalcCanvas.id = recalcCanvasId;
+        recalcCanvas.width = 500;
+        recalcCanvas.height = 500;
+        document.getElementById(resultDivId).parentNode.appendChild(recalcCanvas);
+      }
+      drawRecalcDiagram(
+        recalcCanvasId,
+        points,
+        newAnalysis,
+        filtered,
+        parseFloat(document.getElementById("errorMultiplier").value) || 100,
+        startRad,
+        endRad
+      );
+    }
+
+    // 再計算図の描画：全点グレーアウト、選択範囲内の点は通常表示。新たな円・円弧は緑で
+    function drawRecalcDiagram(canvasId, originalPoints, newAnalysis, filteredPoints, errorMultiplier, startRad, endRad) {
+      const canvas = document.getElementById(canvasId);
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+
+      const baseCirclePx = 100;
+      const cx = canvas.width/2, cy = canvas.height/2;
+
+      // グレーの基準円
+      ctx.beginPath();
+      ctx.setLineDash([5,5]);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = "gray";
+      ctx.arc(cx, cy, baseCirclePx, 0, 2*Math.PI);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // 全点をグレー表示
+      function getDisplayCoord(p) {
+        let angle = Math.atan2(p.y - newAnalysis.centerY, p.x - newAnalysis.centerX);
+        if(angle < 0) angle += 2*Math.PI;
+        const measured_r = Math.hypot(p.x - newAnalysis.centerX, p.y - newAnalysis.centerY);
+        const error_mm = measured_r - newAnalysis.radius;
+        const drawnRadius = baseCirclePx + errorMultiplier * error_mm;
+        return {
+          angle,
+          x: cx + drawnRadius * Math.cos(angle),
+          y: cy + drawnRadius * Math.sin(angle)
+        };
+      }
+      const displayPoints = originalPoints.map(getDisplayCoord);
+      ctx.fillStyle = "lightgray";
+      for (const dp of displayPoints) {
+        ctx.beginPath();
+        ctx.arc(dp.x, dp.y, 3, 0, 2*Math.PI);
+        ctx.fill();
+      }
+
+      // 再計算対象(filteredPoints)を通常表示（青い線 + 赤い点）
+      const filteredDisplay = filteredPoints.map(getDisplayCoord);
+      filteredDisplay.sort((a,b)=> a.angle - b.angle);
+      const n = filteredDisplay.length;
+      let diffs = [];
+      for (let i = 0; i < n; i++) {
+        let next = (i+1) % n;
+        let diff = (i === n-1)
+          ? (filteredDisplay[0].angle + 2*Math.PI - filteredDisplay[i].angle)
+          : (filteredDisplay[i+1].angle - filteredDisplay[i].angle);
+        diffs.push(diff);
+      }
+      const sumDiff = diffs.reduce((a,b)=> a+b, 0);
+      const avgDiff = sumDiff / n;
+
+      ctx.strokeStyle = "blue";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      let maxDiff = Math.max(...diffs);
+      let maxIdx  = diffs.indexOf(maxDiff);
+
+      if(maxDiff < 1.5 * avgDiff) {
+        // 全点連続して閉じる
+        ctx.moveTo(filteredDisplay[0].x, filteredDisplay[0].y);
+        for(let i=1; i<n; i++){
+          ctx.lineTo(filteredDisplay[i].x, filteredDisplay[i].y);
+        }
+        ctx.closePath();
+      } else {
+        // 最大ギャップペアをスキップ
+        ctx.moveTo(filteredDisplay[0].x, filteredDisplay[0].y);
+        for(let i=0; i<n; i++){
+          let next = (i+1) % n;
+          if(i === maxIdx) {
+            ctx.moveTo(filteredDisplay[next].x, filteredDisplay[next].y);
+          } else {
+            ctx.lineTo(filteredDisplay[next].x, filteredDisplay[next].y);
+          }
+        }
+      }
+      ctx.stroke();
+
+      ctx.fillStyle = "red";
+      for (const dp of filteredDisplay) {
+        ctx.beginPath();
+        ctx.arc(dp.x, dp.y, 3, 0, 2*Math.PI);
+        ctx.fill();
+      }
+
+      // 新たな円フィッティング結果（緑色）
+      ctx.strokeStyle = "green";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, baseCirclePx, 0, 2*Math.PI);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(cx, cy, baseCirclePx, newAnalysis.startAngle, newAnalysis.endAngle);
+      ctx.stroke();
+
+      // 入力角度範囲のハンドルを赤で表示
+      ctx.strokeStyle = "red";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(cx + baseCirclePx * Math.cos(startRad), cy + baseCirclePx * Math.sin(startRad), 5, 0, 2*Math.PI);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(cx + baseCirclePx * Math.cos(endRad), cy + baseCirclePx * Math.sin(endRad), 5, 0, 2*Math.PI);
+      ctx.stroke();
+    }
+
+    // メイン処理：計算・描画
+    function calculateAndDraw() {
+      const input1 = document.getElementById("coords1").value;
+      const input2 = document.getElementById("coords2").value;
+      const points1 = parsePoints(input1);
+      const points2 = parsePoints(input2);
+      const errorMultiplier = parseFloat(document.getElementById("errorMultiplier").value) || 100;
+
+      // データセット1
+      if(points1.length >= 3) {
+        globalPoints1 = points1;
+        globalAnalysis1 = computeAnalysis(points1);
+        let r1 = globalAnalysis1;
+        let txt1 = "【フィッティング結果】\n";
+        txt1 += `中心 = (${r1.centerX.toFixed(4)}, ${r1.centerY.toFixed(4)})\n`;
+        txt1 += `半径 = ${r1.radius.toFixed(4)} mm\n`;
+        txt1 += `円弧の割合 = ${r1.arcPercent.toFixed(2)} %\n`;
+        txt1 += "【円弧パラメータ】\n";
+        txt1 += `開始角度 = ${r1.startAngleDeg.toFixed(2)}°\n`;
+        txt1 += `終了角度 = ${r1.endAngleDeg.toFixed(2)}°\n`;
+        txt1 += `角度範囲 = ${r1.arcAngleDeg.toFixed(2)}°\n`;
+        txt1 += `弧長 = ${r1.arcLength.toFixed(4)} mm\n`;
+        txt1 += "【測定点のばらつき】\n";
+        txt1 += `平均絶対誤差 = ${r1.meanAbsError.toFixed(4)} mm\n`;
+        txt1 += `RMS誤差 = ${r1.rmsError.toFixed(4)} mm\n`;
+        txt1 += `最大絶対誤差 = ${r1.maxAbsError.toFixed(4)} mm\n`;
+        txt1 += `最小測定半径 = ${r1.minMeasuredRadius.toFixed(4)} mm\n`;
+        txt1 += `最大測定半径 = ${r1.maxMeasuredRadius.toFixed(4)} mm\n`;
+        txt1 += `従来の真円度 = ${r1.circularity.toFixed(2)} %\n`;
+        txt1 += `真円度（半径法, μm） = ${r1.roundnessError.toFixed(2)} μm\n`;
+        document.getElementById("result1").innerText = txt1;
+
+        drawRoundnessDiagram("canvas1", points1, globalAnalysis1, errorMultiplier);
+      } else {
+        document.getElementById("result1").innerText = "データセット1：3点以上の座標が必要です。";
+        document.getElementById("canvas1").getContext("2d").clearRect(0,0,500,500);
+      }
+
+      // データセット2
+      if(points2.length >= 3) {
+        globalPoints2 = points2;
+        globalAnalysis2 = computeAnalysis(points2);
+        let r2 = globalAnalysis2;
+        let txt2 = "【フィッティング結果】\n";
+        txt2 += `中心 = (${r2.centerX.toFixed(4)}, ${r2.centerY.toFixed(4)})\n`;
+        txt2 += `半径 = ${r2.radius.toFixed(4)} mm\n`;
+        txt2 += `円弧の割合 = ${r2.arcPercent.toFixed(2)} %\n`;
+        txt2 += "【円弧パラメータ】\n";
+        txt2 += `開始角度 = ${r2.startAngleDeg.toFixed(2)}°\n`;
+        txt2 += `終了角度 = ${r2.endAngleDeg.toFixed(2)}°\n`;
+        txt2 += `角度範囲 = ${r2.arcAngleDeg.toFixed(2)}°\n`;
+        txt2 += `弧長 = ${r2.arcLength.toFixed(4)} mm\n`;
+        txt2 += "【測定点のばらつき】\n";
+        txt2 += `平均絶対誤差 = ${r2.meanAbsError.toFixed(4)} mm\n`;
+        txt2 += `RMS誤差 = ${r2.rmsError.toFixed(4)} mm\n`;
+        txt2 += `最大絶対誤差 = ${r2.maxAbsError.toFixed(4)} mm\n`;
+        txt2 += `最小測定半径 = ${r2.minMeasuredRadius.toFixed(4)} mm\n`;
+        txt2 += `最大測定半径 = ${r2.maxMeasuredRadius.toFixed(4)} mm\n`;
+        txt2 += `従来の真円度 = ${r2.circularity.toFixed(2)} %\n`;
+        txt2 += `真円度（半径法, μm） = ${r2.roundnessError.toFixed(2)} μm\n`;
+        document.getElementById("result2").innerText = txt2;
+
+        drawRoundnessDiagram("canvas2", points2, globalAnalysis2, errorMultiplier);
+      } else {
+        document.getElementById("result2").innerText = "データセット2：解析する座標がありません。";
+        document.getElementById("canvas2").getContext("2d").clearRect(0,0,500,500);
+      }
+    }
+  </script>
+</body>
+</html>
